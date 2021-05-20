@@ -1,138 +1,118 @@
-#include <stdint.h>
-#include <string.h>
-#include <stdbool.h>
 #include <stdio.h>
-
+#include <string.h>
+#include <stdlib.h>
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "freertos/queue.h"
 #include "driver/gpio.h"
-#include "esp_log.h"
 
-#include "button_task.h"
 
-#define TAG "BUTTON"
+#define GPIO_OUTPUT_IO_27    27
+#define GPIO_OUTPUT_IO_26    26
+#define GPIO_OUTPUT_IO_25    25
+#define GPIO_OUTPUT_PIN_SEL  ((1ULL<<GPIO_OUTPUT_IO_25) | (1ULL<<GPIO_OUTPUT_IO_26) | (1ULL<<GPIO_OUTPUT_IO_27))
+#define GPIO_INPUT_IO_34     34
+#define GPIO_INPUT_PIN_SEL  ((1ULL<<GPIO_INPUT_IO_34))
+#define ESP_INTR_FLAG_DEFAULT 0
 
-typedef struct {
-  uint8_t pin;
-  bool inverted;
-  uint16_t history;
-  uint32_t down_time;
-  uint32_t next_long_time;
-} debounce_t;
-
-int pin_count = -1;
-debounce_t * debounce;
-QueueHandle_t queue;
-
-static void update_button(debounce_t *d) {
-    d->history = (d->history << 1) | gpio_get_level(d->pin);
-}
-
-#define MASK   0b1111000000111111
-static bool button_rose(debounce_t *d) {
-    if ((d->history & MASK) == 0b0000000000111111) {
-        d->history = 0xffff;
-        return 1;
-    }
-    return 0;
-}
-static bool button_fell(debounce_t *d) {
-    if ((d->history & MASK) == 0b1111000000000000) {
-        d->history = 0x0000;
-        return 1;
-    }
-    return 0;
-}
-static bool button_down(debounce_t *d) {
-    if (d->inverted) return button_fell(d);
-    return button_rose(d);
-}
-static bool button_up(debounce_t *d) {
-    if (d->inverted) return button_rose(d);
-    return button_fell(d);
-}
-
-#define LONG_PRESS_DURATION (2000)
-#define LONG_PRESS_REPEAT (50)
-
-static uint32_t millis() {
-    return esp_timer_get_time() / 1000;
-}
-
-static void send_event(debounce_t db, int ev) {
-    button_event_t event = {
-        .pin = db.pin,
-        .event = ev,
-    };
-    xQueueSend(queue, &event, portMAX_DELAY);
-}
-
-static void button_task(void *pvParameter)
+static xQueueHandle gpio_evt_queue = NULL;
+int cnt = 0;
+bool button_clicked = false;
+static void IRAM_ATTR gpio_isr_handler(void* arg)
 {
-    printf("button task_created\n");
-    for (;;) {
-        for (int idx=0; idx<pin_count; idx++) {
-            update_button(&debounce[idx]);
+    uint32_t gpio_num = (uint32_t) arg;
+    xQueueSendFromISR(gpio_evt_queue, &gpio_num, NULL);
+}
+
+static void input_task(void* arg)
+{
+    uint32_t io_num;
+    while(1) {
+        if(xQueueReceive(gpio_evt_queue, &io_num, portMAX_DELAY)) {
             
-            if (button_down(&debounce[idx]) && debounce[idx].down_time == 0) {
-                debounce[idx].down_time = millis();
-                printf("%d DOWN", debounce[idx].pin);
-                debounce[idx].next_long_time = debounce[idx].down_time + LONG_PRESS_DURATION;
-                send_event(debounce[idx], BUTTON_DOWN);
+            int gpio_level = gpio_get_level(io_num);
+            //printf("GPIO[%d] intr, val: %d\n", io_num, gpio_level);
+            if(gpio_level == 1){
+                
+                if(cnt < 3){
+                    
+                    cnt++;
+
+                }
+                else
+                {
+                    cnt = 0;
+                }
+                //printf("set mode %d\n", cnt);
+                button_clicked = true;
             }
         }
-        vTaskDelay(10/portTICK_PERIOD_MS);
+        vTaskDelay(10);
     }
 }
-
-// QueueHandle_t button_init(unsigned long long pin_select) {
-//     return pulled_button_init(pin_select, GPIO_FLOATING);
-// }
-
-
-void pulled_button_init(unsigned long long pin_select, gpio_pull_mode_t pull_mode)
+static void output_task(void* arg)
 {
-    if (pin_count != -1) {
-        ESP_LOGI(TAG, "Already initialized");
-        return NULL;
-    }
+    printf("output_task started\n");
+    gpio_set_level(GPIO_OUTPUT_IO_25, 0);
+    gpio_set_level(GPIO_OUTPUT_IO_26, 0);
+    gpio_set_level(GPIO_OUTPUT_IO_27, 0);
+    while(1) {
+        
+        if(button_clicked) {
+            //printf("change mode\n");
+        switch (cnt)
+        {
+        case 1:
+            //printf("GPIO[%d] out, val: %d\n", GPIO_OUTPUT_IO_25, 1);
+            gpio_set_level(GPIO_OUTPUT_IO_25, 1);
+            break;
+        case 2:
+            //printf("GPIO[%d] out, val: %d\n", GPIO_OUTPUT_IO_26, 1);
 
-    // Configure the pins
+            gpio_set_level(GPIO_OUTPUT_IO_26, 1);
+            break;
+        case 3:
+            //printf("GPIO[%d] out, val: %d\n", GPIO_OUTPUT_IO_27, 1);
+
+            gpio_set_level(GPIO_OUTPUT_IO_27, 1);
+            break;
+        default:
+            // printf("GPIO[%d] out, val: %d\n", GPIO_OUTPUT_IO_25, 0);
+            // printf("GPIO[%d] out, val: %d\n", GPIO_OUTPUT_IO_26, 0);
+            // printf("GPIO[%d] out, val: %d\n", GPIO_OUTPUT_IO_27, 0);
+            gpio_set_level(GPIO_OUTPUT_IO_25, 0);
+            gpio_set_level(GPIO_OUTPUT_IO_26, 0);
+            gpio_set_level(GPIO_OUTPUT_IO_27, 0);
+            break;
+        }
+        button_clicked = false;
+        }
+        vTaskDelay(10 / portTICK_RATE_MS);
+        
+    }
+}
+void init_button(){
+
     gpio_config_t io_conf;
-    io_conf.mode = GPIO_MODE_INPUT;
-    io_conf.pull_up_en = (pull_mode == GPIO_PULLUP_ONLY || pull_mode == GPIO_PULLUP_PULLDOWN);
-    io_conf.pull_down_en = (pull_mode == GPIO_PULLDOWN_ONLY || pull_mode == GPIO_PULLUP_PULLDOWN);;
-    io_conf.pin_bit_mask = pin_select;
-    gpio_config(&io_conf);
-
-    // Scan the pin map to determine number of pins
-    pin_count = 0;
-    for (int pin=0; pin<=39; pin++) {
-        if ((1ULL<<pin) & pin_select) {
-            pin_count++;
-        }
-    }
-
-    // Initialize global state and queue
-    debounce = calloc(pin_count, sizeof(debounce_t));
-    queue = xQueueCreate(4, sizeof(button_event_t));
-
-    // Scan the pin map to determine each pin number, populate the state
-    uint32_t idx = 0;
-    for (int pin=0; pin<=39; pin++) {
-        if ((1ULL<<pin) & pin_select) {
-            ESP_LOGI(TAG, "Registering button input: %d", pin);
-            debounce[idx].pin = pin;
-            debounce[idx].down_time = 0;
-            debounce[idx].inverted = true;
-            if (debounce[idx].inverted) debounce[idx].history = 0xffff;
-            idx++;
-        }
-    }
-
-    // Spawn a task to monitor the pins
-    xTaskCreate(&button_task, "button_task", 4096, NULL, 10, NULL);
-
     
+    io_conf.intr_type = GPIO_INTR_DISABLE;
+    
+    io_conf.mode = GPIO_MODE_OUTPUT;
+    io_conf.pin_bit_mask = GPIO_OUTPUT_PIN_SEL;
+    io_conf.pull_down_en = 0;
+    io_conf.pull_up_en = 0;
+    gpio_config(&io_conf);
+    io_conf.intr_type = GPIO_INTR_POSEDGE;
+    io_conf.pin_bit_mask = GPIO_INPUT_PIN_SEL;
+    io_conf.mode = GPIO_MODE_INPUT;
+    io_conf.pull_up_en = 1;
+    gpio_config(&io_conf);
+    gpio_set_intr_type(GPIO_INPUT_IO_34, GPIO_INTR_ANYEDGE);
+    gpio_evt_queue = xQueueCreate(10, sizeof(uint32_t));
+    xTaskCreate(input_task, "input_task", 2048, NULL, 10, NULL);
+    xTaskCreate(output_task, "output_task", 2048, NULL, 10, NULL);
+    gpio_install_isr_service(ESP_INTR_FLAG_DEFAULT);
+    gpio_isr_handler_add(GPIO_INPUT_IO_34, gpio_isr_handler, (void*) GPIO_INPUT_IO_34);
+    gpio_isr_handler_remove(GPIO_INPUT_IO_34);
+    gpio_isr_handler_add(GPIO_INPUT_IO_34, gpio_isr_handler, (void*) GPIO_INPUT_IO_34);
 }

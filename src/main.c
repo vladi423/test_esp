@@ -22,8 +22,7 @@
 void app_main() {
 
     printf("Test\n");
-    xTaskCreate(adc_task, "adc_task", 1024*2, NULL, configMAX_PRIORITIES, NULL);
-    //pulled_button_init(PIN_BIT(3), GPIO_FLOATING);
-    //xTaskCreate(tx_task, "uart_tx_task", 1024*2, NULL, configMAX_PRIORITIES-1, NULL);
+    xTaskCreate(adc_task, "adc_task", 2048, NULL, configMAX_PRIORITIES, NULL);
+    init_button();
    
 }

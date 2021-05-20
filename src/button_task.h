@@ -19,7 +19,7 @@ typedef struct {
 } button_event_t;
 
 //QueueHandle_t button_init(unsigned long long pin_select);
-void pulled_button_init(unsigned long long pin_select, gpio_pull_mode_t pull_mode);
+void init_button(void);
 
 #ifdef __cplusplus
 }
